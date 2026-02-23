@@ -33,19 +33,17 @@ def s_amplitudes(mf, Xn, Xf, nslice: list = None):
     # MO-basis dipole
     ao_dipole = mf.mol.intor('int1e_r')
     mo_dipole = np.einsum('pi,kpq,qj->kij', mf.mo_coeff, ao_dipole, mf.mo_coeff)
-    print(f"MO Dipole shape: {mo_dipole.shape}")
     
     # Get the tdms:
     tdm_nf = np.einsum('ia,ib->ab', Xn, Xf[:Xn_ncore, :])
     tdm_fn = np.einsum('ia,ja->ij', Xn, Xf)
-
     # Amplitudes
     ng_amp = np.einsum('kia,ia->k', mo_dipole[:, nslice, nocc : nmo], Xn)
     fn_amp = np.einsum('kba,ba->k', mo_dipole[:, nocc : nmo, nocc : nmo], tdm_nf)
     fn_amp -= np.einsum('kij,ij->k', mo_dipole[:, nslice, :nocc], tdm_fn)
 
+    # Obtain S_fn matrix:
     S_fn =  np.outer(fn_amp, ng_amp)
-
     # Kramers-Heisenberg formula for RIXS
     f = 0.
     f = ((2/15) * np.sum(S_fn**2)) - ((1/30) * ((np.trace(S_fn))**2 + np.sum(S_fn * S_fn.T)))
@@ -70,16 +68,20 @@ def rixs_map(incident_en: tuple[float, float], en_transfer: tuple[float, float],
         raise TypeError("Expected a pair (2-element tuple) for energy transfer")
     
     alpha_ = 1 / 137.036
-    sigma_ev = fwhm / (2 * np.sqrt(2 * np.log(2)))
+    broad_factor /= 27.2114
+    sigma_ev = fwhm / (27.2114 * 2 * np.sqrt(2 * np.log(2)))
     gaussian_broadening = lambda en_transfer, ef: np.exp(-0.5 * ((en_transfer - ef) / sigma_ev)**2)
 
     init_en, final_en = incident_en
     nsteps = int((final_en - init_en) // step_size)
     en_iter = np.linspace(init_en, final_en, nsteps)
+    en_iter /= 27.2114 # Conversion to a.u
 
     init_entrans, final_entrans = en_transfer
     nsteps = int((final_entrans - init_entrans) // step_size)
     entrans_iter = np.linspace(init_entrans, final_entrans, nsteps)
+    entrans_iter /= 27.2114 # Conversion to a.u
+
     rixs_map = np.zeros((len(en_iter), len(entrans_iter)))
 
     for i, en_inc in enumerate(en_iter):
