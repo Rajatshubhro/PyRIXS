@@ -15,6 +15,8 @@ import numpy as np
 import copy
 import sys
 
+EV_PER_HARTREE = 27.211386245988
+HARTREE_PER_EV = 1.0 / EV_PER_HARTREE
 
 '''
 Provide Xn and Xf from two separate TD-DFT/TDA calcs
@@ -82,7 +84,7 @@ def rixs_map(incident_en: tuple[float, float], en_transfer: tuple[float, float],
     entrans_iter = np.linspace(init_entrans, final_entrans, nsteps)
     entrans_iter /= 27.2114 # Conversion to a.u
 
-    rixs_map = np.zeros((len(en_iter), len(entrans_iter)))
+    rixs_intensity_map = np.zeros((len(en_iter), len(entrans_iter)))
 
     for i, en_inc in enumerate(en_iter):
         for j, en_trans in enumerate(entrans_iter):
@@ -98,10 +100,54 @@ def rixs_map(incident_en: tuple[float, float], en_transfer: tuple[float, float],
                     denom = ((en_inc - en_n)**2) + ((broad_factor**2) / 4.)
                     result += np.abs(fn_ampMatrix[nf, nn]) * (((en_f * en_n * alpha_)**2) / denom) * gauss_bf
 
-            rixs_map[i,j] = result
+            rixs_intensity_map[i,j] = result
 
-    return rixs_map
-        
+    return rixs_intensity_map,
+
+def efficient_rixs_map(
+    incident_en: tuple[float, float],
+    en_transfer: tuple[float, float],
+    fn_ampMatrix,      
+    en_vec,           
+    ef_vec,            
+    step_size=0.1,
+    broad_factor=2.4,
+    fwhm=1.2
+):
+    if not isinstance(incident_en, tuple) or len(incident_en) != 2:
+        raise TypeError("Expected a pair (2-element tuple) for incident energy")
+    if not isinstance(en_transfer, tuple) or len(en_transfer) != 2:
+        raise TypeError("Expected a pair (2-element tuple) for energy transfer")
+
+    alpha_ = 1 / 137.036
+    broad_factor_au = broad_factor * HARTREE_PER_EV
+    sigma_au = fwhm / (HARTREE_PER_EV * 2 * np.sqrt(2 * np.log(2)))
+
+    # Build energy grids (in a.u.)
+    en_iter      = np.linspace(*incident_en,  int((incident_en[1]  - incident_en[0])  // step_size)) / EV_PER_HARTREE
+    entrans_iter = np.linspace(*en_transfer,  int((en_transfer[1]  - en_transfer[0])  // step_size)) / EV_PER_HARTREE
+
+    en_vec  = np.asarray(en_vec)   # (Nn,)
+    ef_vec  = np.asarray(ef_vec)   # (Nf,)
+
+    denom = (en_iter[:, None] - en_vec[None, :])**2 + (broad_factor_au**2) / 4.0  # (Ni, Nn)
+    gaussian_broad = np.exp(-0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au)**2)  # (Nj, Nf)
+    amp_factor = np.abs(fn_ampMatrix) * ((ef_vec[:, None] * en_vec[None, :] * alpha_)**2)  # (Nf, Nn)
+
+    # --- Contract over (Nf, Nn) for each (Ni, Nj) ---
+    # For fixed i,j:
+    #   result = sum_{f,n} amp_factor[f,n] / denom[i,n] * gauss[j,f]
+    #
+    # Factor this as:
+    #   result = sum_f gauss[j,f] * sum_n amp_factor[f,n] / denom[i,n]
+    #
+    # Inner sum: (Nf, Nn) / (Ni, Nn)[broadcast] -> sum over n -> (Ni, Nf)
+    residue = np.einsum('fn,in->if', amp_factor, 1.0 / denom)  # (Ni, Nf)
+    rixs_intensity_map = np.einsum('if,jf->ij', residue, gaussian_broad)  # (Ni, Nj)
+    prefactor = (en_iter[:, None] - entrans_iter[None, :]) / en_iter[:, None]  # (Ni, Nj)
+
+    return prefactor * rixs_intensity_map, en_iter, entrans_iter
+
 '''
 coreidx and viridx are optional args.
 If set to None, they include all the core / virt orbs respectively.
@@ -121,8 +167,8 @@ def select_orbitals_dft(mf, coreidx: list = None, viridx: list = None):
     mf_act.mo_coeff = mf.mo_coeff[:,actidx]
     mf_act.mo_energy = mf.mo_energy[actidx]
     mf_act.mo_occ = mf.mo_occ[actidx]
-    #mf_act.direct_scf = False
-    #mf_act._opt = {}
+    mf_act.direct_scf = False
+    mf_act._opt = {}
 
     return mf_act
 
@@ -197,5 +243,5 @@ if __name__ == "__main__":
     # Parameters for RIXS Map:
     incident_en = (375, 405)
     transfer_en = (-1, 15)
-    rixs_map = rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
+    rixs_map = efficient_rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
     print("Passes")
