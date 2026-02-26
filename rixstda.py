@@ -243,5 +243,5 @@ if __name__ == "__main__":
     # Parameters for RIXS Map:
     incident_en = (375, 405)
     transfer_en = (-1, 15)
-    rixs_map = efficient_rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
+    rixs_map, incident_en, loss_en = efficient_rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
     print("Passes")
