@@ -37,12 +37,12 @@ def s_amplitudes(mf, Xn, Xf, nslice: list = None):
     mo_dipole = np.einsum('pi,kpq,qj->kij', mf.mo_coeff, ao_dipole, mf.mo_coeff)
     
     # Get the tdms:
-    tdm_nf = np.einsum('ia,ib->ab', Xn, Xf[:Xn_ncore, :])
-    tdm_fn = np.einsum('ia,ja->ij', Xn, Xf)
+    tdm_nf = np.einsum('ia,ib->ab', Xn, Xf[:Xn_ncore, :], optimize=True)
+    tdm_fn = np.einsum('ia,ja->ij', Xn, Xf, optimize=True)
     # Amplitudes
-    ng_amp = np.einsum('kia,ia->k', mo_dipole[:, nslice, nocc : nmo], Xn)
-    fn_amp = np.einsum('kba,ba->k', mo_dipole[:, nocc : nmo, nocc : nmo], tdm_nf)
-    fn_amp -= np.einsum('kij,ij->k', mo_dipole[:, nslice, :nocc], tdm_fn)
+    ng_amp = np.einsum('kia,ia->k', mo_dipole[:, nslice, nocc : nmo], Xn, optimize=True)
+    fn_amp = np.einsum('kba,ba->k', mo_dipole[:, nocc : nmo, nocc : nmo], tdm_nf, optimize=True)
+    fn_amp -= np.einsum('kij,ij->k', mo_dipole[:, nslice, :nocc], tdm_fn, optimize=True)
 
     # Obtain S_fn matrix:
     S_fn =  np.outer(fn_amp, ng_amp)
@@ -68,7 +68,7 @@ def rixs_map(incident_en: tuple[float, float], en_transfer: tuple[float, float],
         raise TypeError("Expected a pair (2-element tuple) for incident energy")
     if not isinstance(en_transfer, tuple) or len(en_transfer) != 2:
         raise TypeError("Expected a pair (2-element tuple) for energy transfer")
-    
+   
     alpha_ = 1 / 137.036
     broad_factor /= 27.2114
     sigma_ev = fwhm / (27.2114 * 2 * np.sqrt(2 * np.log(2)))
@@ -119,12 +119,13 @@ def efficient_rixs_map(
     if not isinstance(en_transfer, tuple) or len(en_transfer) != 2:
         raise TypeError("Expected a pair (2-element tuple) for energy transfer")
 
+    print(f" *** Begin Building RIXS Map *** ")
     alpha_ = 1 / 137.036
     broad_factor_au = broad_factor * HARTREE_PER_EV
     sigma_au = fwhm / (HARTREE_PER_EV * 2 * np.sqrt(2 * np.log(2)))
 
     # Build energy grids (in a.u.)
-    en_iter      = np.linspace(*incident_en,  int((incident_en[1]  - incident_en[0])  // step_size)) / EV_PER_HARTREE
+    en_iter = np.linspace(*incident_en,  int((incident_en[1]  - incident_en[0])  // step_size)) / EV_PER_HARTREE
     entrans_iter = np.linspace(*en_transfer,  int((en_transfer[1]  - en_transfer[0])  // step_size)) / EV_PER_HARTREE
 
     en_vec  = np.asarray(en_vec)   # (Nn,)
@@ -142,8 +143,8 @@ def efficient_rixs_map(
     #   result = sum_f gauss[j,f] * sum_n amp_factor[f,n] / denom[i,n]
     #
     # Inner sum: (Nf, Nn) / (Ni, Nn)[broadcast] -> sum over n -> (Ni, Nf)
-    residue = np.einsum('fn,in->if', amp_factor, 1.0 / denom)  # (Ni, Nf)
-    rixs_intensity_map = np.einsum('if,jf->ij', residue, gaussian_broad)  # (Ni, Nj)
+    residue = np.einsum('fn,in->if', amp_factor, 1.0 / denom, optimize=True)  # (Ni, Nf)
+    rixs_intensity_map = np.einsum('if,jf->ij', residue, gaussian_broad, optimize=True)  # (Ni, Nj)
     prefactor = (en_iter[:, None] - entrans_iter[None, :]) / en_iter[:, None]  # (Ni, Nj)
 
     return prefactor * rixs_intensity_map, en_iter, entrans_iter
