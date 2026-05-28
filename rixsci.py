@@ -78,31 +78,23 @@ def efficient_rixs_map(
 
 if __name__ == "__main__":
     
-   
-    '''
-    1) Run CI calculation and save the tdms in an output or bin file.
-    2) Also save the energies of ground state, core and valence excited states.
-    3) Read the TDMs and maybe store it like this:
-        tdm between state 3 and 4 ---> [3,4,x,y,z] (5 indices: f-state, n-state, x,y,z)
-    4) Also save the energy vectors similarly. 
+    import pathlib
+    import readCQTDM
+    cwd = pathlib.Path.cwd() / "test.bin"
+    tdm = readCQTDM.buildTDM(cwd)
+    n_cien, f_cien = readCQTDM.CIEnergies(cwd)
 
-    # Example of doing this:
+    n_core = 10
+    n_valence = 20
+    en_n = n_cien
+    en_f = f_cien
+    s_fnMatrix = np.zeros(n_valence, n_core)
 
-        s_fnMatrix = np.zeros((ci_f.nstates, ci_n.nstates))
-        en_f = np.zeros(tdf.nstates)
-        en_n = np.zeros(tdn.nstates)
-        for nf in range(ci_f.nstates):
-            en_f[nf] = ci_f.e[nf]
-            for nn in range(ci_n.nstates):
-                
-                en_n[nn] = ci_n.e[nn]
-                s_fnMatrix[nf,nn] =  s_amplitudes(tdm_fn[nf, nn], tdm_ng[nn,0])
+    for nf in range(len(en_f)):
+        for nn  in range(len(en_n)):
+            s_fnMatrix[nf,nn] = s_amplitudes(tdm[nf,nn], tdm[nn, 0])
 
-        # Parameters for RIXS Map:
-        incident_en = (375, 405)
-        transfer_en = (-1, 15)
-        rixs_map, incident_en, loss_en = efficient_rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
-    
-    '''
-    
-    print("Please use it as a module") 
+    incident_en = (375, 405)
+    transfer_en = (-1, 15)
+    rixs_map, incident_en, loss_en = efficient_rixs_map(incident_en, transfer_en, s_fnmatrix, en_n, en_f)
+

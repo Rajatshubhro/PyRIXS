@@ -46,7 +46,6 @@ def s_amplitudes(mf, Xn, Xf, nslice: list = None):
 
     # Obtain S_fn matrix:
     S_fn =  np.outer(fn_amp, ng_amp)
-    # Kramers-Heisenberg formula for RIXS
     f = 0.
     f = ((2/15) * np.sum(S_fn**2)) - ((1/30) * ((np.trace(S_fn))**2 + np.sum(S_fn * S_fn.T)))
 
