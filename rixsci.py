@@ -79,15 +79,14 @@ def efficient_rixs_map(
 if __name__ == "__main__":
     
     import pathlib
-    import readCQTDM
+    import readCQ
     cwd = pathlib.Path.cwd() / "test.bin"
-    tdm = readCQTDM.buildTDM(cwd)
-    n_cien, f_cien = readCQTDM.CIEnergies(cwd)
+    tdm, en = readCQ.buildCQRIXS(cwd)
 
-    n_core = 10
-    n_valence = 20
-    en_n = n_cien
-    en_f = f_cien
+    en_n = en[10:20]
+    en_f = en[30:50]
+    n_core = len(en_n)
+    n_valence = len(en_f)
     s_fnMatrix = np.zeros(n_valence, n_core)
 
     for nf in range(len(en_f)):
@@ -97,4 +96,3 @@ if __name__ == "__main__":
     incident_en = (375, 405)
     transfer_en = (-1, 15)
     rixs_map, incident_en, loss_en = efficient_rixs_map(incident_en, transfer_en, s_fnmatrix, en_n, en_f)
-
