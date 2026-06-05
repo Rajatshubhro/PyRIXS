@@ -1,9 +1,9 @@
 import sys
 sys.path.append("..")
-import readCQTDM
+import readCQ
 import numpy as np
 import pathlib
 
 cwd = pathlib.Path.cwd() / "test.bin"
-tdm = readCQTDM.buildTDM(cwd)
+tdm = readCQ.buildCQRIXS(cwd)
 print(tdm)

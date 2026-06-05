@@ -121,14 +121,14 @@ def efficient_rixs_map(
     print(f" *** Begin Building RIXS Map *** ")
     alpha_ = 1 / 137.036
     broad_factor_au = broad_factor * HARTREE_PER_EV
-    sigma_au = fwhm / (HARTREE_PER_EV * 2 * np.sqrt(2 * np.log(2)))
+    sigma_au = fwhm / (EV_PER_HARTREE * 2 * np.sqrt(2 * np.log(2)))
 
     # Build energy grids (in a.u.)
     en_iter = np.linspace(*incident_en,  int((incident_en[1]  - incident_en[0])  // step_size)) / EV_PER_HARTREE
     entrans_iter = np.linspace(*en_transfer,  int((en_transfer[1]  - en_transfer[0])  // step_size)) / EV_PER_HARTREE
 
-    en_vec  = np.asarray(en_vec)   # (Nn,)
-    ef_vec  = np.asarray(ef_vec)   # (Nf,)
+    en_vec  = np.asarray(en_vec) / EV_PER_HARTREE   # (Nn,)
+    ef_vec  = np.asarray(ef_vec) / EV_PER_HARTREE  # (Nf,)
 
     denom = (en_iter[:, None] - en_vec[None, :])**2 + (broad_factor_au**2) / 4.0  # (Ni, Nn)
     gaussian_broad = np.exp(-0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au)**2)  # (Nj, Nf)
@@ -146,7 +146,7 @@ def efficient_rixs_map(
     rixs_intensity_map = np.einsum('if,jf->ij', residue, gaussian_broad, optimize=True)  # (Ni, Nj)
     prefactor = (en_iter[:, None] - entrans_iter[None, :]) / en_iter[:, None]  # (Ni, Nj)
 
-    return prefactor * rixs_intensity_map, en_iter, entrans_iter
+    return prefactor * rixs_intensity_map, en_iter * 27.2114, entrans_iter * 27.2114
 
 '''
 coreidx and viridx are optional args.
