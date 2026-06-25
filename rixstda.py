@@ -1,198 +1,237 @@
 '''
-Simulate RIXS spectrum using TDDFT-TDA for K & L-
-Excited State Manifold. User can specify the excitatios that constitute the
-excitation manifold.
+Simulate RIXS spectrum using TDDFT-TDA for K & L-edge excited state manifolds.
 
-Example -> (2p-4d RIXS Spectrum of Ruthenium complex)
-1. Do one DFT (SCF) calculation to create the MOs.
-2. Perform two TDDFT-TDA Calculations, one where you excite
-the 2p-orbitals, and the other where you excite the 4d-orbitals.
-3. Run the RIXS amp function where you pass the two tddft-tda objects.
+The RIXS map computation is delegated to rixsci.rixs_map (incoherent) and
+rixsci.coherent_rixs_map (coherent Kramers-Heisenberg). This module provides
+the PySCF-specific machinery to extract transition dipole moments from TDA
+amplitude vectors and assemble the arrays those functions require.
 
+Workflow
+--------
+1. Run a DFT calculation to obtain MOs (scf.RKS / scf.RHF).
+2. Run two TDA calculations: one for core-excited (intermediate) states, one
+   for valence-excited (final) states, using select_orbitals_dft to restrict
+   the active space.
+3. Call build_pyscf_tdm_matrices to extract the TDM 3-vectors and energies.
+4. Pass the result to rixs_map (incoherent) or coherent_rixs_map (coherent).
+
+Example -- K-edge RIXS of NH3
+------------------------------
+    core_slice = [0]   # 1s core orbital
+    mftd_n = select_orbitals_dft(mf, coreidx=core_slice, viridx=None)
+    tdn = run_tda(mftd_n, nstates=15)
+
+    mftd_f = select_orbitals_dft(mf, coreidx=None, viridx=[10, 12, 14])
+    tdf = run_tda(mftd_f, nstates=20)
+
+    mu_fn, mu_ng, en_core_ev, en_final_ev, s_amp_mat = build_pyscf_tdm_matrices(
+        mf, tdn, tdf, core_slice=core_slice)
+
+    # Incoherent (independent-intermediate-state) map
+    rixs_inc, inc_ax, loss_ax = rixs_map(
+        (375, 405), (-1, 15), s_amp_mat, en_core_ev, en_final_ev,
+        step_size=0.1, broad_factor=2.4, fwhm=1.2)
+
+    # Coherent (Kramers-Heisenberg) map
+    rixs_coh, inc_ax, loss_ax = coherent_rixs_map(
+        (375, 405), (-1, 15), mu_fn, mu_ng, en_core_ev, en_final_ev,
+        step_size=0.1, broad_factor=2.4, fwhm=1.2)
 '''
 from pyscf import gto, scf, tddft
 import numpy as np
 import copy
 import sys
 
+from rixsci import rixs_map, coherent_rixs_map
+
 EV_PER_HARTREE = 27.211386245988
 HARTREE_PER_EV = 1.0 / EV_PER_HARTREE
 
-'''
-Provide Xn and Xf from two separate TD-DFT/TDA calcs
-'''
-def s_amplitudes(mf, Xn, Xf, nslice: list = None):
 
+def get_tdm_vecs(mf, Xn, Xf, nslice: list = None):
+    """
+    Compute the TDM 3-vectors <f|mu|n> and <n|mu|g> from PySCF TDA amplitude matrices.
+
+    Parameters
+    ----------
+    mf     : PySCF SCF object (original full-space calculation)
+    Xn     : (n_core_occ, nvirt) TDA amplitude matrix for intermediate (core) state n
+    Xf     : (nocc, nvirt_f) TDA amplitude matrix for final (valence) state f
+    nslice : list of core orbital indices in the active occupied space;
+             if None, all occupied orbitals are used
+
+    Returns
+    -------
+    fn_amp : (3,) array -- <f|mu|n> Cartesian TDM vector
+    ng_amp : (3,) array -- <n|mu|g> Cartesian TDM vector
+    """
     nocc = Xf.shape[0]
     nvirt = Xf.shape[1]
     nmo = nocc + nvirt
-    if (not nslice):
-        nslice = [i for i in range(nocc)]
+    if not nslice:
+        nslice = list(range(nocc))
         Xn_ncore = nocc
     else:
         Xn_ncore = Xn.shape[0]
 
-    # MO-basis dipole
+    # MO-basis dipole integrals
     ao_dipole = mf.mol.intor('int1e_r')
     mo_dipole = np.einsum('pi,kpq,qj->kij', mf.mo_coeff, ao_dipole, mf.mo_coeff)
-    
-    # Get the tdms:
+
+    # One-particle TDMs between the two manifolds
     tdm_nf = np.einsum('ia,ib->ab', Xn, Xf[:Xn_ncore, :], optimize=True)
     tdm_fn = np.einsum('ia,ja->ij', Xn, Xf, optimize=True)
-    # Amplitudes
-    ng_amp = np.einsum('kia,ia->k', mo_dipole[:, nslice, nocc : nmo], Xn, optimize=True)
-    fn_amp = np.einsum('kba,ba->k', mo_dipole[:, nocc : nmo, nocc : nmo], tdm_nf, optimize=True)
+
+    # <n|mu|g>: ground-to-intermediate dipole
+    ng_amp = np.einsum('kia,ia->k', mo_dipole[:, nslice, nocc:nmo], Xn, optimize=True)
+
+    # <f|mu|n>: intermediate-to-final dipole (virtual-virtual + occ-occ contributions)
+    fn_amp = np.einsum('kba,ba->k', mo_dipole[:, nocc:nmo, nocc:nmo], tdm_nf, optimize=True)
     fn_amp -= np.einsum('kij,ij->k', mo_dipole[:, nslice, :nocc], tdm_fn, optimize=True)
 
-    # Obtain S_fn matrix:
-    S_fn =  np.outer(fn_amp, ng_amp)
-    f = 0.
-    f = ((2/15) * np.sum(S_fn**2)) - ((1/30) * ((np.trace(S_fn))**2 + np.sum(S_fn * S_fn.T)))
+    return fn_amp, ng_amp
 
-    return f
 
-''' 
-Provide ranges for:
-incident_en --> (500, 520)
-en_tranfer --> (-2, 15)
-broad_factor, fwhm --> Optional args
-Defaults:
-    step_size = 0.1 eV
-    broad_factor = 2.4 eV
-    fwhm = 1.2 eV
-'''
-def rixs_map(incident_en: tuple[float, float], en_transfer: tuple[float, float], fn_ampMatrix, en_vec, ef_vec, step_size = 0.1, broad_factor = 2.4, fwhm = 1.2):
+def s_amplitudes(mf, Xn, Xf, nslice: list = None):
+    """
+    Rotationally averaged incoherent scattering amplitude for a single (f, n) pair.
 
-    if not isinstance(incident_en, tuple) or len(incident_en) != 2:
-        raise TypeError("Expected a pair (2-element tuple) for incident energy")
-    if not isinstance(en_transfer, tuple) or len(en_transfer) != 2:
-        raise TypeError("Expected a pair (2-element tuple) for energy transfer")
-   
-    alpha_ = 1 / 137.036
-    broad_factor /= 27.2114
-    sigma_ev = fwhm / (27.2114 * 2 * np.sqrt(2 * np.log(2)))
-    gaussian_broadening = lambda en_transfer, ef: np.exp(-0.5 * ((en_transfer - ef) / sigma_ev)**2)
+    Uses the crossed Placzek invariant:
+        f = (2/15)||S||^2 - (1/30)(|Tr S|^2 + Re[S:S^T])
 
-    init_en, final_en = incident_en
-    nsteps = int((final_en - init_en) // step_size)
-    en_iter = np.linspace(init_en, final_en, nsteps)
-    en_iter /= 27.2114 # Conversion to a.u
+    Parameters
+    ----------
+    mf     : PySCF SCF object
+    Xn     : TDA amplitude matrix for intermediate (core) state n
+    Xf     : TDA amplitude matrix for final (valence) state f
+    nslice : list of core orbital indices; if None, use all occupied
 
-    init_entrans, final_entrans = en_transfer
-    nsteps = int((final_entrans - init_entrans) // step_size)
-    entrans_iter = np.linspace(init_entrans, final_entrans, nsteps)
-    entrans_iter /= 27.2114 # Conversion to a.u
+    Returns
+    -------
+    float : rotationally averaged |S_fn|^2 amplitude
+    """
+    fn_amp, ng_amp = get_tdm_vecs(mf, Xn, Xf, nslice)
+    S_fn = np.outer(fn_amp, ng_amp)
+    f = (
+        (2/15) * np.sum(np.abs(S_fn)**2)
+        - (1/30) * (np.abs(np.trace(S_fn))**2 + np.real(np.sum(S_fn * np.conj(S_fn.T))))
+    )
+    return float(f)
 
-    rixs_intensity_map = np.zeros((len(en_iter), len(entrans_iter)))
 
-    for i, en_inc in enumerate(en_iter):
-        for j, en_trans in enumerate(entrans_iter):
-            
-            en_emit = en_inc - en_trans
-            prefactor = en_emit / en_inc
+def build_pyscf_tdm_matrices(mf, tdn, tdf, core_slice: list = None):
+    """
+    Build the TDM arrays required by rixsci.rixs_map and rixsci.coherent_rixs_map
+    from PySCF TDA objects.
 
-            result = 0.
-            for nf, en_f in enumerate(ef_vec):
-                gauss_bf = gaussian_broadening(en_trans, en_f)
-                for nn, en_n  in enumerate(en_vec):
-                    
-                    denom = ((en_inc - en_n)**2) + ((broad_factor**2) / 4.)
-                    result += np.abs(fn_ampMatrix[nf, nn]) * (((en_f * en_n * alpha_)**2) / denom) * gauss_bf
+    The MO-basis dipole integral is computed once and reused for all (f, n) pairs.
 
-            rixs_intensity_map[i,j] = result
+    Parameters
+    ----------
+    mf         : PySCF SCF object (original full-space calculation)
+    tdn        : TDA object for core-excited (intermediate) states -- Nn states
+    tdf        : TDA object for valence-excited (final) states -- Nf states
+    core_slice : list of core orbital indices; if None, use all occupied
 
-    return rixs_intensity_map,
+    Returns
+    -------
+    mu_fn       : (Nf, Nn, 3) array -- <val_f|mu|core_n> for all (f, n) pairs
+    mu_ng       : (Nn, 3) array     -- <core_n|mu|g> for all core states
+    en_core_ev  : (Nn,) array       -- core excitation energies in eV
+    en_final_ev : (Nf,) array       -- valence excitation energies in eV
+    s_amp_mat   : (Nf, Nn) array    -- incoherent scattering amplitudes for rixs_map
+    """
+    Nn = tdn.nstates
+    Nf = tdf.nstates
 
-def efficient_rixs_map(
-    incident_en: tuple[float, float],
-    en_transfer: tuple[float, float],
-    fn_ampMatrix,      
-    en_vec,           
-    ef_vec,            
-    step_size=0.1,
-    broad_factor=2.4,
-    fwhm=1.2
-):
-    if not isinstance(incident_en, tuple) or len(incident_en) != 2:
-        raise TypeError("Expected a pair (2-element tuple) for incident energy")
-    if not isinstance(en_transfer, tuple) or len(en_transfer) != 2:
-        raise TypeError("Expected a pair (2-element tuple) for energy transfer")
+    # Pre-compute MO-basis dipole once (avoids redundant AO integral evaluation)
+    ao_dipole = mf.mol.intor('int1e_r')
+    mo_dipole = np.einsum('pi,kpq,qj->kij', mf.mo_coeff, ao_dipole, mf.mo_coeff)
 
-    print(f" *** Begin Building RIXS Map *** ")
-    alpha_ = 1 / 137.036
-    broad_factor_au = broad_factor * HARTREE_PER_EV
-    sigma_au = fwhm / (EV_PER_HARTREE * 2 * np.sqrt(2 * np.log(2)))
+    # Infer orbital dimensions from the first final state
+    Xf_ref = tdf.xy[0][0]
+    nocc  = Xf_ref.shape[0]
+    nvirt = Xf_ref.shape[1]
+    nmo   = nocc + nvirt
+    nslice = core_slice if core_slice else list(range(nocc))
+    Xn_ncore = tdn.xy[0][0].shape[0]
 
-    # Build energy grids (in a.u.)
-    en_iter = np.linspace(*incident_en,  int((incident_en[1]  - incident_en[0])  // step_size)) / EV_PER_HARTREE
-    entrans_iter = np.linspace(*en_transfer,  int((en_transfer[1]  - en_transfer[0])  // step_size)) / EV_PER_HARTREE
+    mu_fn = np.zeros((Nf, Nn, 3), dtype=float)
+    mu_ng = np.zeros((Nn, 3), dtype=float)
+    s_amp_mat = np.zeros((Nf, Nn), dtype=float)
 
-    en_vec  = np.asarray(en_vec) / EV_PER_HARTREE   # (Nn,)
-    ef_vec  = np.asarray(ef_vec) / EV_PER_HARTREE  # (Nf,)
+    en_core_ev  = np.array([tdn.e[nn] * EV_PER_HARTREE for nn in range(Nn)])
+    en_final_ev = np.array([tdf.e[nf] * EV_PER_HARTREE for nf in range(Nf)])
 
-    denom = (en_iter[:, None] - en_vec[None, :])**2 + (broad_factor_au**2) / 4.0  # (Ni, Nn)
-    gaussian_broad = np.exp(-0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au)**2)  # (Nj, Nf)
-    amp_factor = np.abs(fn_ampMatrix) * ((ef_vec[:, None] * en_vec[None, :] * alpha_)**2)  # (Nf, Nn)
+    # <n|mu|g> depends only on Xn
+    for nn in range(Nn):
+        Xn = tdn.xy[nn][0]
+        mu_ng[nn, :] = np.einsum(
+            'kia,ia->k', mo_dipole[:, nslice, nocc:nmo], Xn, optimize=True)
 
-    # --- Contract over (Nf, Nn) for each (Ni, Nj) ---
-    # For fixed i,j:
-    #   result = sum_{f,n} amp_factor[f,n] / denom[i,n] * gauss[j,f]
-    #
-    # Factor this as:
-    #   result = sum_f gauss[j,f] * sum_n amp_factor[f,n] / denom[i,n]
-    #
-    # Inner sum: (Nf, Nn) / (Ni, Nn)[broadcast] -> sum over n -> (Ni, Nf)
-    residue = np.einsum('fn,in->if', amp_factor, 1.0 / denom, optimize=True)  # (Ni, Nf)
-    rixs_intensity_map = np.einsum('if,jf->ij', residue, gaussian_broad, optimize=True)  # (Ni, Nj)
-    prefactor = (en_iter[:, None] - entrans_iter[None, :]) / en_iter[:, None]  # (Ni, Nj)
+    # <f|mu|n> and incoherent amplitude for each (f, n) pair
+    for nf in range(Nf):
+        Xf = tdf.xy[nf][0]
+        for nn in range(Nn):
+            Xn = tdn.xy[nn][0]
+            tdm_nf = np.einsum('ia,ib->ab', Xn, Xf[:Xn_ncore, :], optimize=True)
+            tdm_fn = np.einsum('ia,ja->ij', Xn, Xf, optimize=True)
+            fn_amp = np.einsum(
+                'kba,ba->k', mo_dipole[:, nocc:nmo, nocc:nmo], tdm_nf, optimize=True)
+            fn_amp -= np.einsum(
+                'kij,ij->k', mo_dipole[:, nslice, :nocc], tdm_fn, optimize=True)
+            mu_fn[nf, nn, :] = fn_amp
+            S_fn = np.outer(fn_amp, mu_ng[nn, :])
+            s_amp_mat[nf, nn] = float(
+                (2/15) * np.sum(np.abs(S_fn)**2)
+                - (1/30) * (np.abs(np.trace(S_fn))**2
+                            + np.real(np.sum(S_fn * np.conj(S_fn.T))))
+            )
 
-    return prefactor * rixs_intensity_map, en_iter * 27.2114, entrans_iter * 27.2114
+    return mu_fn, mu_ng, en_core_ev, en_final_ev, s_amp_mat
 
-'''
-coreidx and viridx are optional args.
-If set to None, they include all the core / virt orbs respectively.
-Example:
-    coreidx --> [0,1,2,3]
-    viridx  --> [6,7,8,9]
-'''
+
 def select_orbitals_dft(mf, coreidx: list = None, viridx: list = None):
-    
-    if (coreidx == None):
+    """
+    Build an active-space SCF object by selecting specific occupied (core) and
+    virtual orbital indices.
+
+    Parameters
+    ----------
+    coreidx : list of occupied orbital indices; if None, use all occupied
+    viridx  : list of virtual orbital indices;  if None, use all virtual
+
+    Returns
+    -------
+    mf_act : copy of mf with mo_coeff/mo_energy/mo_occ restricted to actidx
+    """
+    if coreidx is None:
         coreidx = np.where(mf.mo_occ == 2)[0].tolist()
-    if (viridx == None):
+    if viridx is None:
         viridx = np.where(mf.mo_occ == 0)[0].tolist()
-            
+
     actidx = coreidx + viridx
     mf_act = copy.deepcopy(mf)
-    mf_act.mo_coeff = mf.mo_coeff[:,actidx]
+    mf_act.mo_coeff  = mf.mo_coeff[:, actidx]
     mf_act.mo_energy = mf.mo_energy[actidx]
-    mf_act.mo_occ = mf.mo_occ[actidx]
+    mf_act.mo_occ    = mf.mo_occ[actidx]
     mf_act.direct_scf = False
     mf_act._opt = {}
-
     return mf_act
 
-'''
-Easy Run TD-DFT TDA:
-nstates in optional parameter
 
-'''
 def run_tda(mf, nstates=1):
-
+    """Run a TDA calculation and return the TDA object."""
     tda = tddft.TDA(mf)
     tda.nstates = nstates
     tda.verbose = 4
     tda.kernel()
     tda.analyze()
-    
     return tda
 
 
-'''
-if "main" : Runs test on RIXS
-'''
 if __name__ == "__main__":
-    
+
     np.set_printoptions(threshold=sys.maxsize, linewidth=80)
     mol = gto.Mole()
     mol.atom = '''
@@ -204,44 +243,42 @@ if __name__ == "__main__":
     mol.basis = 'cc-pVDZ'
     mol.verbose = 4
     mol.build()
-    
+
     mf = scf.RKS(mol)
     mf.verbose = 4
     mf.xc = 'b3lyp'
     mf.kernel()
     mf.analyze()
-    
-    # Select core and virtual orbitals for TDDFT:
-    # mftd_n: Evaluate core-excited states
-    # mftd_f: Obtain the valence-excited states
-    '''
-    n_slice: List of ncore orbitals that is user-defined for 
-    the core excited states.
-    '''
-    core_slice = [0] # K-edge Core excited state
-    mftd_n = select_orbitals_dft(mf, coreidx = core_slice, viridx = None)
-    tdn = run_tda(mftd_n, 15)
-    tdn.analyze()
-    mftd_f = select_orbitals_dft(mf, coreidx = None, viridx=[10,12,14])
-    tdf = run_tda(mftd_f, 20)
-    tdf.analyze()
- 
 
-    # Make the S_fn Matrix:
-    s_fnMatrix = np.zeros((tdf.nstates, tdn.nstates))
-    en_f = np.zeros(tdf.nstates)
-    en_n = np.zeros(tdn.nstates)
-    for nf in range(tdf.nstates):
-        en_f[nf] = tdf.e[nf]
-        for nn in range(tdn.nstates):
+    # -- Step 1: TDA for core-excited (intermediate) states -----------------
+    core_slice = [0]   # N 1s core orbital (K-edge)
+    mftd_n = select_orbitals_dft(mf, coreidx=core_slice, viridx=None)
+    tdn = run_tda(mftd_n, nstates=15)
 
-            Xn = tdn.xy[nn][0]
-            Xf = tdf.xy[nf][0]
-            s_fnMatrix[nf,nn] =  s_amplitudes(mf, Xn, Xf, core_slice)
-            en_n[nn] = tdn.e[nn]
+    # -- Step 2: TDA for valence-excited (final) states ---------------------
+    mftd_f = select_orbitals_dft(mf, coreidx=None, viridx=[10, 12, 14])
+    tdf = run_tda(mftd_f, nstates=20)
 
-    # Parameters for RIXS Map:
-    incident_en = (375, 405)
-    transfer_en = (-1, 15)
-    rixs_map, incident_en, loss_en = efficient_rixs_map(incident_en, transfer_en, s_fnMatrix, en_n, en_f)
+    # -- Step 3: Build TDM arrays (single AO integral call, energies in eV) -
+    mu_fn, mu_ng, en_core_ev, en_final_ev, s_amp_mat = build_pyscf_tdm_matrices(
+        mf, tdn, tdf, core_slice=core_slice)
+
+    incident_en = (375.0, 405.0)   # eV
+    transfer_en = (-1.0,  15.0)    # eV
+
+    # -- Step 4a: Incoherent RIXS map (rixsci.rixs_map) --------------------
+    rixs_inc, inc_ax, loss_ax = rixs_map(
+        incident_en, transfer_en,
+        s_amp_mat, en_core_ev, en_final_ev,
+        step_size=0.1, broad_factor=2.4, fwhm=1.2,
+    )
+    print(f"Incoherent RIXS map shape: {rixs_inc.shape}")
+
+    # -- Step 4b: Coherent (Kramers-Heisenberg) RIXS map -------------------
+    rixs_coh, inc_ax, loss_ax = coherent_rixs_map(
+        incident_en, transfer_en,
+        mu_fn, mu_ng, en_core_ev, en_final_ev,
+        step_size=0.1, broad_factor=2.4, fwhm=1.2,
+    )
+    print(f"Coherent RIXS map shape:    {rixs_coh.shape}")
     print("Passes")
