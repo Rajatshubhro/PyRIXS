@@ -21,7 +21,7 @@ def s_amplitudes(tdm_fn, tdm_ng):
     tdm_fn = np.asarray(tdm_fn, dtype=complex)
     tdm_ng = np.asarray(tdm_ng, dtype=complex)
 
-    S_fn = np.outer(tdm_fn.conj(), tdm_ng)          # (3, 3)
+    S_fn = np.outer(tdm_fn, tdm_ng)                  # (3, 3)
     f = (
         (2.0 / 15.0) * np.sum(np.abs(S_fn) ** 2)
         - (1.0 / 30.0) * (
@@ -44,7 +44,6 @@ def rixs_map(
 ):
     """Incoherent (independent-intermediate-state) RIXS map."""
     print(" *** Begin Building RIXS Map *** ")
-    alpha_ = 1.0 / 137.036
     broad_factor_au = broad_factor * HARTREE_PER_EV
     sigma_au = fwhm * HARTREE_PER_EV / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
@@ -59,12 +58,12 @@ def rixs_map(
     denom = (en_iter[:, None] - en_vec[None, :]) ** 2 + (broad_factor_au / 2.0) ** 2
 
     # Gaussian over energy transfer for each final state  (Nj, Nf)
-    gaussian_broad = np.exp(
-        -0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au) ** 2
+    gaussian_broad = (
+        np.exp(-0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au) ** 2)
+        / (np.sqrt(2.0 * np.pi) * sigma_au)
     )
 
-    # Scale amplitude matrix by (omega_n * alpha)^2  ->  (Nf, Nn) broadcast over Ni
-    amp_factor = fn_ampMatrix * (en_vec[None, :] * alpha_) ** 2   # (Nf, Nn)
+    amp_factor = fn_ampMatrix   # (Nf, Nn) plain scattering amplitudes
 
     # Sum over n: residue[i, f] = sum_n amp[f,n] / denom[i,n]   (Ni, Nf)
     residue = np.einsum("fn,in->if", amp_factor, 1.0 / denom, optimize=True)
@@ -73,10 +72,8 @@ def rixs_map(
     omega_emit = en_iter[:, None] - entrans_iter[None, :]
 
     # RIXS map  (Ni, Nj) — sum over final states with Gaussian broadening.
-    # NOTE: the full prefactor is omega_emit^3 / omega_in (omega_emit^2 here × omega_emit/omega_in
-    # below). This differs from the coherent map (omega_emit^1/omega_in). Both match the
-    # respective originals; the asymmetry is pre-existing in the source code.
-    rixs_intensity_map = (omega_emit ** 2) * np.einsum(
+    # Kinematic prefactor omega_emit / omega_in, consistent with the coherent map.
+    rixs_intensity_map = np.einsum(
         "if,jf->ij", residue, gaussian_broad, optimize=True
     )
     prefactor = omega_emit / en_iter[:, None]
@@ -101,7 +98,6 @@ def coherent_rixs_map(
 ):
     """Coherent (Kramers-Heisenberg) RIXS map with rotational averaging."""
     print(" *** Begin Building Coherent RIXS Map *** ")
-    alpha_ = 1.0 / 137.036
     broad_factor_au = broad_factor * HARTREE_PER_EV
     sigma_au = fwhm * HARTREE_PER_EV / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
@@ -113,10 +109,8 @@ def coherent_rixs_map(
     ef_vec = np.asarray(ef_vec, dtype=float) * HARTREE_PER_EV   # (Nf,)
 
     # Outer product T_fn^{xy} = <f|mu_x|n> * <n|mu_y|g>   (Nf, Nn, 3, 3)
-    T_fn = np.einsum("fnx,ny->fnxy", np.conj(tdm_fn), tdm_ng, optimize=True)
-
-    # Scale by (omega_n * alpha)  — applied per intermediate state
-    T_fn *= (en_vec[None, :, None, None] * alpha_)
+    # No conjugation: <f|mu|n> enters the KH amplitude as-is.
+    T_fn = np.einsum("fnx,ny->fnxy", tdm_fn, tdm_ng, optimize=True)
 
     # Complex Lorentzian denominator  (Ni, Nn)
     gamma_half = broad_factor_au / 2.0
@@ -125,18 +119,14 @@ def coherent_rixs_map(
     # Coherent sum over n: A_fg^{xy}   (Ni, Nf, 3, 3)
     A_fg = np.einsum("fnxy,in->ifxy", T_fn, 1.0 / complex_denom, optimize=True)
 
-    # Rotational averaging (Placzek invariants)
-    term1 = (2.0 / 15.0) * np.sum(np.abs(A_fg) ** 2, axis=(2, 3))          # (Ni, Nf)
-    tr_A  = np.trace(A_fg, axis1=2, axis2=3)                                 # (Ni, Nf)
-    term2a = np.abs(tr_A) ** 2                                               # (Ni, Nf)
-    A_fg_T = np.swapaxes(A_fg, 2, 3)
-    term2b = np.real(np.sum(A_fg * np.conj(A_fg_T), axis=(2, 3)))           # (Ni, Nf)
+    # Orientational average: isotropic/unpolarized ||A||^2 / 3   (Ni, Nf)
+    # Matches rixs-pyscf-tdm.py iso_average="unpolarized".
+    averaged_cross_section = np.sum(np.abs(A_fg) ** 2, axis=(2, 3)) / 3.0   # (Ni, Nf)
 
-    averaged_cross_section = term1 - (1.0 / 30.0) * (term2a + term2b)       # (Ni, Nf)
-
-    # Gaussian broadening over final states  (Nj, Nf)
-    gaussian_broad = np.exp(
-        -0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au) ** 2
+    # Normalized Gaussian broadening over final states  (Nj, Nf)
+    gaussian_broad = (
+        np.exp(-0.5 * ((entrans_iter[:, None] - ef_vec[None, :]) / sigma_au) ** 2)
+        / (np.sqrt(2.0 * np.pi) * sigma_au)
     )
 
     # RIXS map  (Ni, Nj).
