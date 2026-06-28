@@ -141,8 +141,8 @@ def build_pyscf_tdm_matrices(mf, tdn, tdf, core_slice: list = None):
     en_final_ev : (Nf,) array       -- valence excitation energies in eV
     s_amp_mat   : (Nf, Nn) array    -- incoherent scattering amplitudes for rixs_map
     """
-    Nn = tdn.nstates
-    Nf = tdf.nstates
+    Nn = len(tdn.e)
+    Nf = len(tdf.e)
 
     # Pre-compute MO-basis dipole once (avoids redundant AO integral evaluation)
     ao_dipole = mf.mol.intor('int1e_r')
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     tdn = run_tda(mftd_n, nstates=15)
 
     # -- Step 2: TDA for valence-excited (final) states ---------------------
-    mftd_f = select_orbitals_dft(mf, coreidx=None, viridx=[10, 12, 14])
+    mftd_f = select_orbitals_dft(mf, coreidx=None, viridx=None)
     tdf = run_tda(mftd_f, nstates=20)
 
     # -- Step 3: Build TDM arrays (single AO integral call, energies in eV) -
